@@ -1,0 +1,211 @@
+extends CharacterBody3D
+
+# Константы механик 
+const WALK_SPEED = 5.0
+const SPRINT_SPEED = 8.0
+const JUMP_VELOCITY = 4.5
+const BOB_FREQ = 2.4 # Частота тряски камеры
+const BOB_AMP = 0.08 # Амплитуда тряски камеры
+const SWAY_LERP = 3.0 # Скорость плавного движения фонарика за камерой
+
+var t_bob = 0.0 # Таймер для тряски камеры
+var mouse_sensitivity = 0.002 # Чувствительность мыши
+var default_head_height = 2.0 
+
+# Узлы сцены 
+@onready var head = $Head # Узел для поворота головы по X 
+@onready var camera = $Head/Camera3D # Камера
+@onready var flashlight = $Head/Camera3D/SpotLight3D # Фонарик
+@onready var ray = $Head/Camera3D/RayCast3D # Луч для взаимодействия
+@onready var interact_label = get_node_or_null("CanvasLayer/Lable") # Текстовая метка для взаимодействия
+@onready var pause_menu = get_node_or_null("CanvasLayer/PauseMenu")
+@onready var step_sound = $StepSound
+@onready var flashlight_sound = $FlashlightSound
+@onready var pickup_message = $CanvasLayer2/PickupMessage
+@onready var black_screen = %BlackScreen
+
+var is_paused = false
+
+var gravity = ProjectSettings.get_setting("physics/3d/default_gravity")
+
+func _ready():
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+	if head:
+		head.position = Vector3(0, default_head_height, 0) # Начальная высота головы
+	if camera:
+		camera.position = Vector3.ZERO # Камера в центре головы
+	if flashlight:
+		flashlight.visible = false
+		flashlight.top_level = true
+								
+	if Global.target_spawn_point != "":
+		call_deferred("teleport_to_spawn")
+
+func _unhandled_input(event):
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		toggle_pause()
+		return
+
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F:
+		if flashlight:
+			flashlight.visible = !flashlight.visible
+	
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F:
+		if flashlight:
+			flashlight.visible = !flashlight.visible
+			if flashlight_sound: flashlight_sound.play()
+		
+	if is_paused: return
+
+	if event is InputEventMouseMotion:
+		rotate_y(-event.relative.x * mouse_sensitivity)
+		if head:
+			head.rotate_x(-event.relative.y * mouse_sensitivity)
+			head.rotation.x = clamp(head.rotation.x, deg_to_rad(-89), deg_to_rad(89))
+
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		check_interaction()
+	
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F:
+		if flashlight:
+			flashlight.visible = !flashlight.visible
+
+
+func _physics_process(delta):
+	# Гравитация 
+	if not is_on_floor():
+		velocity.y -= gravity * delta # Применяем гравитацию, если не на земле
+
+	# Прыжок 
+	if Input.is_action_just_pressed("ui_accept") and is_on_floor(): # ui_accept обычно привязан к Пробелу
+		velocity.y = JUMP_VELOCITY # Устанавливаем скорость прыжка
+
+	# Перемещение 
+	var current_speed = WALK_SPEED
+	if Input.is_key_pressed(KEY_SHIFT):
+		current_speed = SPRINT_SPEED
+
+	# Получаем направление движения по W,A,S,D
+	var input_dir = Vector2.ZERO
+	if Input.is_key_pressed(KEY_W): input_dir.y -= 1
+	if Input.is_key_pressed(KEY_S): input_dir.y += 1
+	if Input.is_key_pressed(KEY_A): input_dir.x -= 1
+	if Input.is_key_pressed(KEY_D): input_dir.x += 1
+	var direction = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+	
+	if direction:
+		velocity.x = direction.x * current_speed
+		velocity.z = direction.z * current_speed
+	else: # Если нет ввода, замедляемся до нуля
+		velocity.x = move_toward(velocity.x, 0, current_speed)
+		velocity.z = move_toward(velocity.z, 0, current_speed)
+
+	# Тряска камеры 
+	# t_bob увеличивается только при движении и нахождении на земле
+	t_bob += delta * velocity.length() * float(is_on_floor())
+	if camera:
+		var pos = Vector3.ZERO
+		pos.y = sin(t_bob * BOB_FREQ) * BOB_AMP # Движение вверх-вниз
+		pos.x = cos(t_bob * BOB_FREQ / 2) * BOB_AMP # Движение влево-вправо
+		camera.position = pos # Применяем тряску к позиции камеры
+	var last_bob = sin(t_bob * BOB_FREQ)
+	t_bob += delta * velocity.length() * float(is_on_floor())
+	var current_bob = sin(t_bob * BOB_FREQ)
+
+	if last_bob > 0 and current_bob <= 0:
+		if is_on_floor() and step_sound and not step_sound.playing:
+			step_sound.pitch_scale = randf_range(0.8, 1.2)
+			step_sound.play()
+
+	# Плавное движение фонарика
+	if flashlight and flashlight.visible:
+		var target_transform = camera.global_transform # Целевая позиция - позиция камеры
+		# Фонарик плавно следует за камерой
+		flashlight.global_transform = flashlight.global_transform.interpolate_with(target_transform, SWAY_LERP * delta)
+
+	move_and_slide()
+
+	#Обработка UI для взаимодействия
+	process_interaction_ui()
+
+
+# Эта функция отвечает только за видимость и текст метки взаимодействия
+func process_interaction_ui():
+	if interact_label == null: return
+	
+	if ray.is_colliding():
+		var obj = ray.get_collider()
+		
+		if is_instance_valid(obj) and obj.has_method("get_text"):
+			interact_label.visible = true
+			interact_label.text = obj.get_text()
+		else:
+			interact_label.visible = false
+	else:
+		interact_label.visible = false
+		
+func toggle_pause():
+	is_paused = !is_paused
+	get_tree().paused = is_paused
+	
+	if pause_menu:
+		pause_menu.visible = is_paused
+	
+	if is_paused:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		if interact_label: interact_label.visible = false
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		
+func check_interaction():
+	if ray and ray.is_colliding():
+		var obj = ray.get_collider()
+		if obj.has_method("interact"):
+			obj.interact()
+
+
+func _on_button_pressed() -> void:
+	toggle_pause()
+
+
+func _on_button_2_pressed() -> void:
+	get_tree().quit()
+
+func teleport_to_spawn():
+	print("Ищу точку с именем: ", Global.target_spawn_point)
+	var scene = get_tree().current_scene
+	print("Текущая сцена: ", scene.name) # Проверь, та ли это сцена в консоли
+
+	var spawn_node = get_tree().current_scene.find_child(Global.target_spawn_point, true, false)
+	if spawn_node:
+		global_position = spawn_node.global_position
+		global_rotation = spawn_node.global_rotation
+		Global.target_spawn_point = ""
+	else:
+		print("Критическая ошибка: Точка ", Global.target_spawn_point, " не найдена!")
+
+func show_pickup_text(item_name):
+	pickup_message.text = "Вы подобрали: " + item_name
+	pickup_message.visible = true
+	
+	await get_tree().create_timer(2.0).timeout
+	
+	pickup_message.visible = false
+	
+func stay_in_darkness():
+	black_screen.visible = true
+	black_screen.modulate.a = 0
+	
+	var tween = create_tween()
+	tween.tween_property(black_screen, "modulate:a", 1.0, 2.0)
+	
+	set_physics_process(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	
+#func _input(event):
+	#if event.is_action_pressed("interact"): # Или "ui_accept" / ЛКМ
+		#if ray.is_colliding():
+			#var obj = ray.get_collider()
+			#if is_instance_valid(obj) and obj.has_method("interact"):
+				#obj.interact()
