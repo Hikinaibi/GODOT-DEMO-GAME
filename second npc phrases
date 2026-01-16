@@ -1,0 +1,24 @@
+extends CharacterBody3D
+
+@onready var anim_tree = $AnimationTree
+
+var dialogues = [
+	"Ну всё, пошли!",
+]
+var current_index = -1 # Индекс текущей фразы. -1 означает, что диалог не активен
+
+func _ready():
+	if anim_tree:
+		anim_tree.active = true
+
+# Вызывается игроком при клике
+func interact():
+	current_index += 1 # Переходим к следующей фразе
+	if current_index >= dialogues.size(): # Если фразы закончились
+		current_index = -1 # Сбрасываем индекс, чтобы вернуться к подсказке
+	return get_text() # Возвращаем текст текущей фразы или подсказки
+
+func get_text():
+	if current_index == -1: # Если диалог не активен
+		return "Нажмите для взаимодействия" # Возвращаем стандартную подсказку
+	return dialogues[current_index] # Возвращаем текущую фразу из массива
